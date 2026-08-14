@@ -6,6 +6,9 @@ on:
     # UTC 07:00 ≈ KST 16:00 (도쿄 마감 뒤), UTC 21:00 ≈ KST 06:00 (NY 마감 뒤)
     - cron: "0 7 * * 1-5"
     - cron: "0 21 * * 1-5"
+  push:
+    paths:
+      - "docs/manual.json"   # 수동값 커밋 시 즉시 재수집·분석
   workflow_dispatch: {}   # 수동 실행 버튼
 
 permissions:
