@@ -46,6 +46,27 @@ def _retry(fn, *args, tries=3, wait=2, **kwargs):
 
 
 # ----------------------------------------------------------------------
+# 수동 입력값  (docs/manual.json)  — FRED 근사치보다 우선 적용
+# ----------------------------------------------------------------------
+def load_manual():
+    """
+    docs/manual.json 에서 수동 지정값을 읽는다. 없으면 빈 dict.
+    형식 예:
+      { "jp10y": {"value": 1.62, "asof": "2026-08-14"} }
+    """
+    path = os.path.join("docs", "manual.json")
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception as e:  # noqa
+        print(f"   ! manual.json 읽기 실패(무시): {e}")
+        return {}
+
+
+# ----------------------------------------------------------------------
 # FRED
 # ----------------------------------------------------------------------
 FRED_SERIES = {
@@ -155,16 +176,30 @@ def collect():
     now = dt.datetime.utcnow().replace(microsecond=0)
 
     metrics = {}
+    manual = load_manual()
 
     # --- 1. 조달비용: 미일 금리차 ------------------------------------
     us2y, us2y_d = fred_latest(FRED_SERIES["US2Y"])
     us10y, _ = fred_latest(FRED_SERIES["US10Y"])
     print(f"US2Y={us2y} US10Y={us10y}")
 
-    # 일본 금리: Yahoo 티커(^TNX 계열은 미국). 일본 10Y는 무료 실시간이 제한적이라
-    # FRED 월간(OECD)을 1차로 쓰되, 있으면 Yahoo 의 JGB 프록시로 보완.
-    jp10y, jp10y_d = fred_latest(FRED_SERIES["JP10Y"])
-    print(f"JP10Y(FRED월간)={jp10y}")
+    # 일본 10Y: 수동값(manual.json) 우선, 없으면 FRED 월간(OECD) 근사.
+    jp10y_fred, jp10y_fred_d = fred_latest(FRED_SERIES["JP10Y"])
+    jp_manual = manual.get("jp10y") or {}
+    jp_manual_val = jp_manual.get("value")
+
+    if isinstance(jp_manual_val, (int, float)):
+        jp10y = float(jp_manual_val)
+        jp10y_d = jp_manual.get("asof")
+        jp10y_src = "manual"
+        jp10y_label = "일 국채 10년(수동)"
+        print(f"JP10Y(수동)={jp10y}  (FRED근사={jp10y_fred})")
+    else:
+        jp10y = jp10y_fred
+        jp10y_d = jp10y_fred_d
+        jp10y_src = "fred"
+        jp10y_label = "일 국채 10년(월간·근사)"
+        print(f"JP10Y(FRED월간)={jp10y}")
 
     us_jp_2y_gap = None
     if us2y is not None and jp10y is not None:
@@ -174,7 +209,8 @@ def collect():
 
     metrics["us2y"] = {"label": "미 국채 2년", "value": us2y, "unit": "%", "asof": us2y_d}
     metrics["us10y"] = {"label": "미 국채 10년", "value": us10y, "unit": "%"}
-    metrics["jp10y"] = {"label": "일 국채 10년(월간)", "value": jp10y, "unit": "%", "asof": jp10y_d}
+    metrics["jp10y"] = {"label": jp10y_label, "value": jp10y, "unit": "%",
+                        "asof": jp10y_d, "src": jp10y_src, "fred_ref": jp10y_fred}
     metrics["rate_gap"] = {"label": "미일 금리차(2Y-JP10Y 근사)", "value": us_jp_2y_gap, "unit": "%p"}
 
     # --- 2. 환율 (트리거) -------------------------------------------
@@ -274,6 +310,8 @@ def collect():
         "subscores": {k: (round(v, 1) if v is not None else None) for k, v in sub.items()},
         "weights": weights,
         "metrics": metrics,
+        "repo": os.environ.get("GITHUB_REPOSITORY"),          # 예: birdjinx/yen-canary
+        "branch": os.environ.get("GITHUB_REF_NAME", "main"),  # 예: main
         "notes": {
             "rate_gap": "미일 2Y-JP10Y 근사 스프레드. 축소 속도가 청산 압력의 선행지표.",
             "yen_3d": "3거래일 누적 엔 강세 3% 돌파 시 마진콜 도미노 임계(2024.8 사례).",
