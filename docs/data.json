@@ -1,1 +1,83 @@
-
+{
+  "updated_utc": "2026-08-14T10:56:39Z",
+  "score": 25.2,
+  "level": "watch",
+  "subscores": {
+    "rate_gap": 82.3,
+    "yen_3d": 0.0,
+    "vix": 0.0,
+    "move": 0.0,
+    "hy_oas": 0.0,
+    "jp10y": 58.5
+  },
+  "weights": {
+    "rate_gap": 0.2,
+    "jp10y": 0.15,
+    "yen_3d": 0.25,
+    "vix": 0.12,
+    "move": 0.13,
+    "hy_oas": 0.15
+  },
+  "metrics": {
+    "us2y": {
+      "label": "미 국채 2년",
+      "value": 4.2,
+      "unit": "%",
+      "asof": "2026-08-12"
+    },
+    "us10y": {
+      "label": "미 국채 10년",
+      "value": 4.68,
+      "unit": "%"
+    },
+    "jp10y": {
+      "label": "일 국채 10년(월간)",
+      "value": 2.67,
+      "unit": "%",
+      "asof": "2026-06-01"
+    },
+    "rate_gap": {
+      "label": "미일 금리차(2Y-JP10Y 근사)",
+      "value": 1.53,
+      "unit": "%p"
+    },
+    "usdjpy": {
+      "label": "달러/엔",
+      "value": 159.17,
+      "unit": "엔"
+    },
+    "yen_3d": {
+      "label": "엔화 3일 강세율",
+      "value": -0.01,
+      "unit": "%"
+    },
+    "vix": {
+      "label": "VIX (주식 변동성)",
+      "value": 14.54,
+      "unit": ""
+    },
+    "move": {
+      "label": "MOVE (채권 변동성)",
+      "value": 69.23,
+      "unit": ""
+    },
+    "hy_oas": {
+      "label": "美 하이일드 스프레드(OAS)",
+      "value": 2.71,
+      "unit": "%",
+      "asof": "2026-08-12"
+    },
+    "ig_oas": {
+      "label": "美 투자등급 스프레드(OAS)",
+      "value": 0.79,
+      "unit": "%"
+    }
+  },
+  "notes": {
+    "rate_gap": "미일 2Y-JP10Y 근사 스프레드. 축소 속도가 청산 압력의 선행지표.",
+    "yen_3d": "3거래일 누적 엔 강세 3% 돌파 시 마진콜 도미노 임계(2024.8 사례).",
+    "vix_move": "VIX+MOVE 동반 상승 시 캐리청산형 충격 가능성.",
+    "hy_oas": "사모신용·CLO는 후행. 유동성 있는 HY OAS 를 선행 프록시로 사용.",
+    "jp10y": "FRED 월간(OECD) 근사. 실시간 JGB 는 무료 제약으로 지연 가능."
+  }
+}
