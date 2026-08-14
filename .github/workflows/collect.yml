@@ -29,6 +29,7 @@ jobs:
       - name: Collect data
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: python scripts/collect_data.py
 
       - name: Commit data.json
