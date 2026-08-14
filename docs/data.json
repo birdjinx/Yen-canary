@@ -1,5 +1,5 @@
 {
-  "updated_utc": "2026-08-14T10:56:39Z",
+  "updated_utc": "2026-08-14T11:13:37Z",
   "score": 25.2,
   "level": "watch",
   "subscores": {
@@ -32,7 +32,7 @@
     },
     "jp10y": {
       "label": "일 국채 10년(월간)",
-      "value": 2.87,
+      "value": 2.67,
       "unit": "%",
       "asof": "2026-06-01"
     },
@@ -43,7 +43,7 @@
     },
     "usdjpy": {
       "label": "달러/엔",
-      "value": 159.17,
+      "value": 159.18,
       "unit": "엔"
     },
     "yen_3d": {
@@ -53,12 +53,12 @@
     },
     "vix": {
       "label": "VIX (주식 변동성)",
-      "value": 14.54,
+      "value": 14.5,
       "unit": ""
     },
     "move": {
       "label": "MOVE (채권 변동성)",
-      "value": 69.23,
+      "value": 70.88,
       "unit": ""
     },
     "hy_oas": {
@@ -79,5 +79,10 @@
     "vix_move": "VIX+MOVE 동반 상승 시 캐리청산형 충격 가능성.",
     "hy_oas": "사모신용·CLO는 후행. 유동성 있는 HY OAS 를 선행 프록시로 사용.",
     "jp10y": "FRED 월간(OECD) 근사. 실시간 JGB 는 무료 제약으로 지연 가능."
+  },
+  "analysis": {
+    "text": null,
+    "model": null,
+    "generated_utc": null
   }
 }
