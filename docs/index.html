@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>yen-canary · 엔캐리 청산 조기경보</title>
+<style>
+  :root{
+    --bg:#0e1116;
+    --panel:#161b22;
+    --panel2:#1c232d;
+    --line:#232b36;
+    --ink:#e6edf3;
+    --muted:#8b98a5;
+    --calm:#3fb950;
+    --watch:#d4a72c;
+    --elevated:#e08a3c;
+    --alarm:#f0503c;
+    --accent:#58a6ff;
+    --mono:"SFMono-Regular",ui-monospace,"Roboto Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans KR",sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--ink);
+    font-family:var(--sans);line-height:1.5;
+    padding:24px 16px 64px;
+    max-width:1000px;margin:0 auto;
+  }
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  .brand{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+  h1{font-size:20px;font-weight:700;letter-spacing:-.3px}
+  .brand .sub{color:var(--muted);font-size:13px}
+  .updated{color:var(--muted);font-size:12px;font-family:var(--mono);margin-top:6px}
+
+  /* 상태 배너 */
+  .status{
+    margin-top:20px;border:1px solid var(--line);border-radius:12px;
+    background:var(--panel);padding:20px 22px;
+    display:grid;grid-template-columns:auto 1fr;gap:22px;align-items:center;
+  }
+  .gauge{
+    width:120px;height:120px;border-radius:50%;
+    display:grid;place-items:center;position:relative;
+    background:conic-gradient(var(--gz,var(--muted)) calc(var(--pct,0)*1%), #222c38 0);
+  }
+  .gauge::after{
+    content:"";position:absolute;inset:10px;border-radius:50%;background:var(--panel);
+  }
+  .gauge .num{position:relative;z-index:1;text-align:center}
+  .gauge .num b{font-size:30px;font-family:var(--mono);letter-spacing:-1px}
+  .gauge .num span{display:block;font-size:11px;color:var(--muted)}
+  .status .txt h2{font-size:15px;font-weight:600;margin-bottom:6px}
+  .badge{
+    display:inline-block;font-size:12px;font-weight:700;
+    padding:3px 10px;border-radius:999px;letter-spacing:.3px;
+  }
+  .badge.calm{background:rgba(63,185,80,.15);color:var(--calm)}
+  .badge.watch{background:rgba(212,167,44,.15);color:var(--watch)}
+  .badge.elevated{background:rgba(224,138,60,.15);color:var(--elevated)}
+  .badge.alarm{background:rgba(240,80,60,.15);color:var(--alarm)}
+  .badge.unknown{background:rgba(139,152,165,.15);color:var(--muted)}
+  .status .desc{color:var(--muted);font-size:13px;margin-top:8px}
+
+  /* 카테고리 섹션 */
+  .group{margin-top:28px}
+  .group > h3{
+    font-size:12px;text-transform:uppercase;letter-spacing:1px;
+    color:var(--muted);margin-bottom:10px;font-weight:600;
+    display:flex;align-items:center;gap:8px;
+  }
+  .group > h3 .n{
+    font-family:var(--mono);font-size:11px;color:var(--accent);
+    border:1px solid var(--line);border-radius:4px;padding:1px 5px;
+  }
+  .cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+  .card{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:14px 15px;position:relative;overflow:hidden;
+  }
+  .card .lab{font-size:12px;color:var(--muted);margin-bottom:8px;min-height:32px}
+  .card .val{font-size:24px;font-family:var(--mono);font-weight:600;letter-spacing:-.5px}
+  .card .val .u{font-size:13px;color:var(--muted);margin-left:3px;font-weight:400}
+  .card .asof{font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:6px}
+  .risk-bar{
+    position:absolute;left:0;bottom:0;height:3px;width:100%;
+    background:#222c38;
+  }
+  .risk-bar span{display:block;height:100%;transition:width .4s ease}
+  .sub{font-size:11px;font-family:var(--mono);margin-top:8px;color:var(--muted)}
+
+  .note{
+    margin-top:32px;border:1px solid var(--line);border-radius:10px;
+    background:var(--panel2);padding:16px 18px;font-size:12.5px;color:var(--muted);
+  }
+  .note b{color:var(--ink);font-weight:600}
+  .note ul{margin:8px 0 0 16px;display:flex;flex-direction:column;gap:4px}
+  footer{margin-top:28px;color:var(--muted);font-size:11px;text-align:center;font-family:var(--mono)}
+  a{color:var(--accent);text-decoration:none}
+  .err{color:var(--alarm);font-family:var(--mono);font-size:13px;padding:20px 0}
+  @media(max-width:560px){
+    .status{grid-template-columns:1fr;text-align:center;justify-items:center}
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>🐤 yen-canary</h1>
+    <span class="sub">엔캐리 트레이드 청산 조기경보 모니터</span>
+  </div>
+  <div class="updated" id="updated">불러오는 중…</div>
+</header>
+
+<div id="app"><div class="err" style="color:var(--muted)">데이터 로딩 중…</div></div>
+
+<div class="note">
+  <b>읽는 법</b> — 지표는 4개 흐름 순서로 배열돼 있습니다.
+  ①조달비용 → ②환율 트리거 → ③변동성 전이 → ④크레딧 경로.
+  통상 ①②가 먼저 악화되고 ③④가 뒤따릅니다.
+  각 카드 하단 막대는 그 지표의 위험 기여도(0~100)입니다.
+  <ul>
+    <li><b>엔 3일 강세율 3% 돌파</b> — 마진콜 도미노 임계 (2024.8 사례).</li>
+    <li><b>VIX + MOVE 동반 상승</b> — 단순 조정이 아닌 캐리청산형 충격 신호.</li>
+    <li><b>HY 스프레드 확대</b> — 사모신용·CLO는 후행하므로 유동성 있는 HY OAS를 선행 프록시로.</li>
+    <li>일본 10년물은 FRED 월간(OECD) 근사치라 실시간 대비 지연될 수 있습니다.</li>
+  </ul>
+</div>
+
+<footer>
+  data via FRED &amp; Yahoo Finance · 투자 조언 아님 · 자동 수집 (평일 2회)
+</footer>
+
+<script>
+const LEVEL = {
+  calm:     {ko:"평온",  color:"var(--calm)",     desc:"청산 압력 신호 미미. 통상 범위 내에서 움직이는 국면."},
+  watch:    {ko:"경계",  color:"var(--watch)",    desc:"일부 지표가 상단으로 이동 중. 방향성 주시 필요."},
+  elevated: {ko:"주의",  color:"var(--elevated)", desc:"복수 지표가 임계에 근접. 변동성 확대 대비 국면."},
+  alarm:    {ko:"경보",  color:"var(--alarm)",    desc:"청산형 스트레스 다발. 급격한 자금 회수 리스크 고조."},
+  unknown:  {ko:"불명",  color:"var(--muted)",    desc:"데이터 부족으로 종합 판정 불가."}
+};
+
+// 카테고리 배열 (라벨 순서 = 흐름 순서)
+const GROUPS = [
+  {n:"①", title:"조달비용 · Cost of Carry",
+   keys:["us2y","us10y","jp10y","rate_gap"], sub:{rate_gap:"rate_gap", jp10y:"jp10y"}},
+  {n:"②", title:"환율 트리거",
+   keys:["usdjpy","yen_3d"], sub:{yen_3d:"yen_3d"}},
+  {n:"③", title:"변동성 전이",
+   keys:["vix","move"], sub:{vix:"vix", move:"move"}},
+  {n:"④", title:"크레딧 경로",
+   keys:["hy_oas","ig_oas"], sub:{hy_oas:"hy_oas"}},
+];
+
+function riskColor(v){
+  if(v==null) return "var(--muted)";
+  if(v<25) return "var(--calm)";
+  if(v<50) return "var(--watch)";
+  if(v<70) return "var(--elevated)";
+  return "var(--alarm)";
+}
+function fmt(m){
+  if(!m || m.value==null) return '<span style="color:var(--muted)">—</span>';
+  return m.value + (m.unit?`<span class="u">${m.unit}</span>`:"");
+}
+
+async function load(){
+  let data;
+  try{
+    const r = await fetch("data.json?_="+Date.now());
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    data = await r.json();
+  }catch(e){
+    document.getElementById("app").innerHTML =
+      `<div class="err">data.json을 불러오지 못했습니다: ${e.message}<br>
+       GitHub Actions가 최소 1회 실행됐는지 확인하세요.</div>`;
+    document.getElementById("updated").textContent = "";
+    return;
+  }
+
+  const lv = LEVEL[data.level] || LEVEL.unknown;
+  const score = data.score;
+  const pct = score==null?0:score;
+
+  document.getElementById("updated").textContent =
+    "업데이트 " + (data.updated_utc||"").replace("T"," ").replace("Z"," UTC");
+
+  let html = "";
+
+  // 상태 배너
+  html += `
+    <div class="status">
+      <div class="gauge" style="--pct:${pct};--gz:${lv.color}">
+        <div class="num"><b>${score==null?"—":score}</b><span>/ 100</span></div>
+      </div>
+      <div class="txt">
+        <h2>종합 청산 리스크</h2>
+        <span class="badge ${data.level}">${lv.ko}</span>
+        <div class="desc">${lv.desc}</div>
+      </div>
+    </div>`;
+
+  // 카테고리별 카드
+  const M = data.metrics||{};
+  const S = data.subscores||{};
+  for(const g of GROUPS){
+    html += `<div class="group"><h3><span class="n">${g.n}</span>${g.title}</h3><div class="cards">`;
+    for(const key of g.keys){
+      const m = M[key];
+      if(!m) continue;
+      const subKey = g.sub[key];
+      const risk = subKey ? S[subKey] : null;
+      html += `<div class="card">
+        <div class="lab">${m.label||key}</div>
+        <div class="val">${fmt(m)}</div>
+        ${m.asof?`<div class="asof">as of ${m.asof}</div>`:""}
+        ${risk!=null?`<div class="sub">위험기여 ${risk}</div>`:""}
+        ${risk!=null?`<div class="risk-bar"><span style="width:${risk}%;background:${riskColor(risk)}"></span></div>`:""}
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+
+  document.getElementById("app").innerHTML = html;
+}
+load();
+</script>
+</body>
+</html>
