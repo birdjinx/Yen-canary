@@ -89,8 +89,32 @@
   .risk-bar span{display:block;height:100%;transition:width .4s ease}
   .sub{font-size:11px;font-family:var(--mono);margin-top:8px;color:var(--muted)}
 
+  /* Claude 분석 패널 */
+  .analysis{
+    margin-top:24px;border:1px solid var(--line);border-radius:12px;
+    background:linear-gradient(180deg,var(--panel) 0%,var(--panel2) 100%);
+    padding:18px 20px;position:relative;
+  }
+  .analysis .tag{
+    display:flex;align-items:center;gap:8px;margin-bottom:10px;
+  }
+  .analysis .tag .dot{
+    width:7px;height:7px;border-radius:50%;background:var(--accent);
+    box-shadow:0 0 0 3px rgba(88,166,255,.15);
+  }
+  .analysis .tag h3{
+    font-size:12px;text-transform:uppercase;letter-spacing:1px;
+    color:var(--accent);font-weight:600;
+  }
+  .analysis .tag .model{
+    margin-left:auto;font-family:var(--mono);font-size:10px;color:var(--muted);
+  }
+  .analysis .body{font-size:14px;line-height:1.75;color:var(--ink)}
+  .analysis .gen{font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:10px}
+  .analysis .empty{font-size:13px;color:var(--muted)}
+
   .note{
-    margin-top:32px;border:1px solid var(--line);border-radius:10px;
+    margin-top:24px;border:1px solid var(--line);border-radius:10px;
     background:var(--panel2);padding:16px 18px;font-size:12.5px;color:var(--muted);
   }
   .note b{color:var(--ink);font-weight:600}
@@ -199,6 +223,21 @@ async function load(){
         <div class="desc">${lv.desc}</div>
       </div>
     </div>`;
+
+  // Claude 분석 패널
+  const az = data.analysis || {};
+  if(az.text){
+    html += `
+    <div class="analysis">
+      <div class="tag">
+        <span class="dot"></span>
+        <h3>Claude 진단</h3>
+        ${az.model?`<span class="model">${az.model}</span>`:""}
+      </div>
+      <div class="body">${az.text.replace(/</g,"&lt;")}</div>
+      ${az.generated_utc?`<div class="gen">generated ${az.generated_utc.replace("T"," ").replace("Z"," UTC")}</div>`:""}
+    </div>`;
+  }
 
   // 카테고리별 카드
   const M = data.metrics||{};
