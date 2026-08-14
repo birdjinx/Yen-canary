@@ -360,7 +360,8 @@ function render(){
             <div class="manual-row">
               <input id="jpInput" type="number" step="0.01" placeholder="예: 1.62"
                      value="${usingPreview?previewJp:""}"
-                     oninput="livePreview()">
+                     onkeydown="if(event.key==='Enter'){event.preventDefault();applyPreview();}">
+              <button onclick="applyPreview()">미리보기</button>
               <button onclick="clearPreview()">초기화</button>
             </div>
             <div class="manual-row" style="margin-top:7px">
@@ -391,16 +392,15 @@ function render(){
   document.getElementById("app").innerHTML = html;
 }
 
-function livePreview(){
+function applyPreview(){
   const el = document.getElementById("jpInput");
-  const raw = el.value;
+  if(!el) return;
+  const raw = (el.value||"").trim();
+  if(raw===""){ previewJp = null; render(); return; }
   const v = parseFloat(raw);
-  previewJp = isNaN(v) ? null : v;
+  if(isNaN(v)){ el.focus(); return; }
+  previewJp = v;
   render();
-  // 재렌더 후 입력창 포커스·커서 복원
-  const el2 = document.getElementById("jpInput");
-  if(el2){ el2.value = raw; el2.focus();
-    const n = raw.length; try{ el2.setSelectionRange(n,n); }catch(e){} }
 }
 function clearPreview(){
   previewJp = null;
