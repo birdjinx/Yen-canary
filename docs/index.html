@@ -89,6 +89,36 @@
   .risk-bar span{display:block;height:100%;transition:width .4s ease}
   .sub{font-size:11px;font-family:var(--mono);margin-top:8px;color:var(--muted)}
 
+  /* 수동 미리보기 입력 */
+  .manual-edit{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}
+  .manual-edit label{font-size:10px;color:var(--muted);display:block;margin-bottom:4px}
+  .manual-row{display:flex;gap:6px;align-items:center}
+  .manual-row input{
+    width:76px;background:#0d1117;border:1px solid var(--line);border-radius:6px;
+    color:var(--ink);font-family:var(--mono);font-size:13px;padding:5px 7px;
+  }
+  .manual-row input:focus{outline:none;border-color:var(--accent)}
+  .manual-row button{
+    background:var(--panel2);border:1px solid var(--line);border-radius:6px;
+    color:var(--muted);font-size:11px;padding:5px 9px;cursor:pointer;
+  }
+  .manual-row button:hover{border-color:var(--accent);color:var(--accent)}
+  .manual-row button.confirm{
+    background:rgba(88,166,255,.12);border-color:var(--accent);color:var(--accent);
+    font-weight:600;width:100%;padding:7px;
+  }
+  .manual-row button.confirm:hover{background:rgba(88,166,255,.22)}
+  .manual-row button.confirm:disabled{
+    opacity:.4;cursor:not-allowed;background:var(--panel2);
+    border-color:var(--line);color:var(--muted);
+  }
+  .preview-flag{
+    display:none;margin-top:6px;font-size:10px;font-family:var(--mono);
+    color:var(--watch);
+  }
+  .preview-flag.on{display:block}
+  .fred-ref{font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:4px}
+
   /* Claude 분석 패널 */
   .analysis{
     margin-top:24px;border:1px solid var(--line);border-radius:12px;
@@ -188,12 +218,39 @@ function fmt(m){
   return m.value + (m.unit?`<span class="u">${m.unit}</span>`:"");
 }
 
+// 위험 정규화 구간 (collect_data.py의 band 인자와 반드시 일치시킬 것)
+const BANDS = {
+  rate_gap: [4.0, 1.0],   // 값이 낮을수록 위험 (금리차 축소)
+  jp10y:    [1.5, 3.5],   // 값이 높을수록 위험 (자국 회귀 유인)
+  yen_3d:   [0.0, 3.0],
+  vix:      [15.0, 40.0],
+  move:     [90.0, 160.0],
+  hy_oas:   [3.0, 8.0],
+};
+function bandRisk(val, key){
+  const b = BANDS[key];
+  if(val==null || !b) return null;
+  const [lo,hi] = b;
+  if(hi===lo) return 0;
+  let x = (val - lo)/(hi - lo)*100;
+  return Math.max(0, Math.min(100, x));
+}
+function levelOf(total){
+  if(total==null) return "unknown";
+  if(total<25) return "calm";
+  if(total<50) return "watch";
+  if(total<70) return "elevated";
+  return "alarm";
+}
+
+let DATA = null;         // 원본 (수집값)
+let previewJp = null;    // 화면 미리보기용 일본 10Y 임시값 (null = 원본 사용)
+
 async function load(){
-  let data;
   try{
     const r = await fetch("data.json?_="+Date.now());
     if(!r.ok) throw new Error("HTTP "+r.status);
-    data = await r.json();
+    DATA = await r.json();
   }catch(e){
     document.getElementById("app").innerHTML =
       `<div class="err">data.json을 불러오지 못했습니다: ${e.message}<br>
@@ -201,13 +258,43 @@ async function load(){
     document.getElementById("updated").textContent = "";
     return;
   }
-
-  const lv = LEVEL[data.level] || LEVEL.unknown;
-  const score = data.score;
-  const pct = score==null?0:score;
-
   document.getElementById("updated").textContent =
-    "업데이트 " + (data.updated_utc||"").replace("T"," ").replace("Z"," UTC");
+    "업데이트 " + (DATA.updated_utc||"").replace("T"," ").replace("Z"," UTC");
+  render();
+}
+
+function render(){
+  const data = DATA;
+  const M = data.metrics||{};
+  const baseS = data.subscores||{};
+  const weights = data.weights||{};
+
+  // 미리보기 값이 있으면 jp10y·rate_gap·총점을 다시 계산
+  const usingPreview = (previewJp != null);
+  const S = Object.assign({}, baseS);
+  let jpShown = M.jp10y ? M.jp10y.value : null;
+  let gapShown = M.rate_gap ? M.rate_gap.value : null;
+
+  if(usingPreview){
+    jpShown = previewJp;
+    S.jp10y = bandRisk(previewJp, "jp10y");
+    const us2y = M.us2y ? M.us2y.value : null;
+    if(us2y!=null){
+      gapShown = Math.round((us2y - previewJp)*1000)/1000;
+      S.rate_gap = bandRisk(gapShown, "rate_gap");
+    }
+  }
+
+  // 총점 재계산 (가중 평균, null 지표는 제외)
+  let num=0, den=0;
+  for(const k in weights){
+    const s = S[k];
+    if(s!=null){ num += s*weights[k]; den += weights[k]; }
+  }
+  const score = den>0 ? Math.round(num/den*10)/10 : null;
+  const level = levelOf(score);
+  const lv = LEVEL[level] || LEVEL.unknown;
+  const pct = score==null?0:score;
 
   let html = "";
 
@@ -219,48 +306,124 @@ async function load(){
       </div>
       <div class="txt">
         <h2>종합 청산 리스크</h2>
-        <span class="badge ${data.level}">${lv.ko}</span>
+        <span class="badge ${level}">${lv.ko}</span>
+        ${usingPreview?`<span class="badge watch" style="margin-left:6px">미리보기</span>`:""}
         <div class="desc">${lv.desc}</div>
       </div>
     </div>`;
 
-  // Claude 분석 패널
+  // Claude 분석 패널 (미리보기 중엔 안내만)
   const az = data.analysis || {};
-  if(az.text){
+  if(az.text && !usingPreview){
     html += `
     <div class="analysis">
-      <div class="tag">
-        <span class="dot"></span>
-        <h3>Claude 진단</h3>
-        ${az.model?`<span class="model">${az.model}</span>`:""}
-      </div>
+      <div class="tag"><span class="dot"></span><h3>Claude 진단</h3>
+        ${az.model?`<span class="model">${az.model}</span>`:""}</div>
       <div class="body">${az.text.replace(/</g,"&lt;")}</div>
       ${az.generated_utc?`<div class="gen">generated ${az.generated_utc.replace("T"," ").replace("Z"," UTC")}</div>`:""}
     </div>`;
+  } else if(az.text && usingPreview){
+    html += `<div class="analysis"><div class="tag"><span class="dot"></span>
+      <h3>Claude 진단</h3></div><div class="empty">미리보기 값 기준입니다.
+      확정 진단은 manual.json에 값을 반영해 재수집하면 갱신됩니다.</div></div>`;
   }
 
   // 카테고리별 카드
-  const M = data.metrics||{};
-  const S = data.subscores||{};
   for(const g of GROUPS){
     html += `<div class="group"><h3><span class="n">${g.n}</span>${g.title}</h3><div class="cards">`;
     for(const key of g.keys){
       const m = M[key];
       if(!m) continue;
       const subKey = g.sub[key];
-      const risk = subKey ? S[subKey] : null;
+      let risk = subKey ? S[subKey] : null;
+      if(risk!=null) risk = Math.round(risk*10)/10;
+
+      // 표시값: jp10y·rate_gap 은 미리보기 반영
+      let dispVal = m.value, dispUnit = m.unit||"";
+      if(key==="jp10y") dispVal = jpShown;
+      if(key==="rate_gap") dispVal = gapShown;
+      const valHtml = (dispVal==null)
+        ? '<span style="color:var(--muted)">—</span>'
+        : dispVal + (dispUnit?`<span class="u">${dispUnit}</span>`:"");
+
+      // jp10y 카드: 미리보기 + GitHub 편집으로 확정
+      let extra = "";
+      if(key==="jp10y"){
+        const fredRef = (m.fred_ref!=null) ? m.fred_ref : null;
+        const srcTxt = usingPreview ? "미리보기 입력값"
+                      : (m.src==="manual" ? "manual.json 적용중" : "FRED 근사");
+        const canConfirm = !!(data.repo);
+        extra = `
+          ${fredRef!=null?`<div class="fred-ref">FRED 참고 ${fredRef}%</div>`:""}
+          <div class="manual-edit">
+            <label>정확한 값 입력 (${srcTxt})</label>
+            <div class="manual-row">
+              <input id="jpInput" type="number" step="0.01" placeholder="예: 1.62"
+                     value="${usingPreview?previewJp:""}"
+                     oninput="livePreview()">
+              <button onclick="clearPreview()">초기화</button>
+            </div>
+            <div class="manual-row" style="margin-top:7px">
+              <button class="confirm" onclick="confirmValue()" ${canConfirm?"":"disabled"}>
+                이 값으로 확정 →
+              </button>
+            </div>
+            <div class="preview-flag ${usingPreview?'on':''}">
+              지금은 화면 미리보기입니다. "확정"을 누르면 GitHub 편집 화면이 열리고,
+              커밋하면 재수집·분석이 자동 실행됩니다.
+            </div>
+            ${canConfirm?"":`<div class="preview-flag on">저장소 정보가 없어 확정 버튼이 비활성화됐습니다. Actions로 최소 1회 수집하면 활성화됩니다.</div>`}
+          </div>`;
+      }
+
       html += `<div class="card">
         <div class="lab">${m.label||key}</div>
-        <div class="val">${fmt(m)}</div>
+        <div class="val">${valHtml}</div>
         ${m.asof?`<div class="asof">as of ${m.asof}</div>`:""}
         ${risk!=null?`<div class="sub">위험기여 ${risk}</div>`:""}
         ${risk!=null?`<div class="risk-bar"><span style="width:${risk}%;background:${riskColor(risk)}"></span></div>`:""}
+        ${extra}
       </div>`;
     }
     html += `</div></div>`;
   }
 
   document.getElementById("app").innerHTML = html;
+}
+
+function livePreview(){
+  const el = document.getElementById("jpInput");
+  const raw = el.value;
+  const v = parseFloat(raw);
+  previewJp = isNaN(v) ? null : v;
+  render();
+  // 재렌더 후 입력창 포커스·커서 복원
+  const el2 = document.getElementById("jpInput");
+  if(el2){ el2.value = raw; el2.focus();
+    const n = raw.length; try{ el2.setSelectionRange(n,n); }catch(e){} }
+}
+function clearPreview(){
+  previewJp = null;
+  render();
+}
+function confirmValue(){
+  const v = (previewJp!=null) ? previewJp
+          : parseFloat((document.getElementById("jpInput")||{}).value);
+  if(v==null || isNaN(v)){
+    const el=document.getElementById("jpInput"); if(el) el.focus(); return;
+  }
+  if(!DATA.repo){ return; }
+  const today = new Date().toISOString().slice(0,10);
+  // manual.json 전체 내용을 미리 채운다
+  const content = JSON.stringify({
+    "_help": "jp10y.value를 실제 금리(%)로, asof를 기준일로. null이면 FRED 근사로 폴백.",
+    "jp10y": { "value": v, "asof": today }
+  }, null, 2) + "\n";
+  const branch = DATA.branch || "main";
+  const url = `https://github.com/${DATA.repo}/edit/${branch}/docs/manual.json`
+            + `?value=${encodeURIComponent(content)}`
+            + `&message=${encodeURIComponent("manual: jp10y "+v+"% ("+today+")")}`;
+  window.open(url, "_blank");
 }
 load();
 </script>
