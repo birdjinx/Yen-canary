@@ -115,6 +115,124 @@ def fred_latest(series_id):
     return None, None
 
 
+def fred_history(series_id, limit=800):
+    """FRED 시계열의 최근 관측 다수를 (date, value) 리스트로. 최신순."""
+    if not FRED_KEY:
+        return []
+    base = "https://api.stlouisfed.org/fred/series/observations"
+    q = {"series_id": series_id, "api_key": FRED_KEY, "file_type": "json",
+         "sort_order": "desc", "limit": limit}
+    url = base + "?" + urlencode(q)
+
+    def _call():
+        r = requests.get(url, headers=UA, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    data = _retry(_call)
+    out = []
+    if not data:
+        return out
+    for obs in data.get("observations", []):
+        v = obs.get("value", ".")
+        if v not in (".", "", None):
+            try:
+                out.append((obs.get("date"), float(v)))
+            except ValueError:
+                continue
+    return out
+
+
+# ----------------------------------------------------------------------
+# CFTC  (Traders in Financial Futures, Combined) — 키 불필요 (Socrata)
+#   엔 선물의 레버리지펀드(헤지펀드) 순숏 = 캐리 롱 '연료량'
+# ----------------------------------------------------------------------
+CFTC_TFF_URL = "https://publicreporting.cftc.gov/resource/yw9f-hn96.json"
+
+
+def cftc_yen_positioning(weeks=160):
+    """
+    엔 선물 레버리지펀드 순포지션을 최근 weeks주 가져와,
+    최신 순숏과 3년 백분위(청산 연료의 극단성)를 계산.
+    반환: dict 또는 None.
+    """
+    params = {
+        "$where": "market_and_exchange_names like '%JAPANESE YEN%'",
+        "$select": ("report_date_as_yyyy_mm_dd,lev_money_positions_long,"
+                    "lev_money_positions_short,open_interest_all"),
+        "$order": "report_date_as_yyyy_mm_dd DESC",
+        "$limit": weeks,
+    }
+    url = CFTC_TFF_URL + "?" + urlencode(params)
+
+    def _call():
+        r = requests.get(url, headers=UA, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    rows = _retry(_call, tries=3)
+    if not rows:
+        print("   ! CFTC 응답 없음 — 지표 생략")
+        return None
+
+    # net = long - short  (음수일수록 순숏 = 캐리 롱)
+    nets = []
+    latest = None
+    for row in rows:
+        try:
+            lng = float(row.get("lev_money_positions_long", "nan"))
+            sht = float(row.get("lev_money_positions_short", "nan"))
+        except (TypeError, ValueError):
+            continue
+        if lng != lng or sht != sht:  # nan 체크
+            continue
+        net = lng - sht
+        date = row.get("report_date_as_yyyy_mm_dd", "")[:10]
+        nets.append(net)
+        if latest is None:
+            latest = {"date": date, "net": net, "long": lng, "short": sht}
+
+    if latest is None or not nets:
+        return None
+
+    # 순숏 규모(양수화) = -net (net이 음수면 숏 우위)
+    net_short = -latest["net"]
+
+    # 3년(≈156주) 순숏 백분위: 과거 대비 지금 숏이 얼마나 극단적인가
+    short_vals = [-n for n in nets]           # 순숏 크기들
+    below = sum(1 for x in short_vals if x <= net_short)
+    pctile = round(below / len(short_vals) * 100, 1) if short_vals else None
+
+    print(f"CFTC 엔 net={latest['net']:.0f} net_short={net_short:.0f} "
+          f"pctile={pctile} (n={len(nets)}주)")
+    return {
+        "date": latest["date"],
+        "net": latest["net"],
+        "net_short": net_short,
+        "pctile": pctile,
+        "n_weeks": len(nets),
+    }
+
+
+# ----------------------------------------------------------------------
+# 달러 조달 스트레스 프록시  (진짜 XCCY basis는 무료 소스 없음)
+#   SOFR - 3M T-bill 스프레드로 단기 달러자금 경색을 근사.
+#   값이 커질수록(또는 급변할수록) 달러 조달 압력 상승 신호.
+# ----------------------------------------------------------------------
+def funding_stress_proxy():
+    """
+    SOFR 와 3개월 T-bill(DTB3) 격차를 달러 조달 스트레스 프록시로.
+    반환: (spread_bp, asof) 또는 (None, None).
+    주: 진짜 크로스커런시 베이시스가 아니라 근사 프록시임을 대시보드에 명시.
+    """
+    sofr, sofr_d = fred_latest("SOFR")
+    tb3, _ = fred_latest("DTB3")
+    if sofr is None or tb3 is None:
+        return None, None
+    spread_bp = round((sofr - tb3) * 100, 1)  # %p → bp
+    return spread_bp, sofr_d
+
+
 # ----------------------------------------------------------------------
 # Yahoo Finance  (키 불필요)
 # ----------------------------------------------------------------------
@@ -238,6 +356,25 @@ def collect():
     metrics["hy_oas"] = {"label": "美 하이일드 스프레드(OAS)", "value": hy, "unit": "%", "asof": hy_d}
     metrics["ig_oas"] = {"label": "美 투자등급 스프레드(OAS)", "value": ig, "unit": "%"}
 
+    # --- 5. 청산 연료: CFTC 엔 순숏 포지션 (선행) --------------------
+    cftc = cftc_yen_positioning()
+    if cftc:
+        metrics["cftc_short"] = {
+            "label": "헤지펀드 엔 순숏(청산 연료)",
+            "value": round(cftc["net_short"]) if cftc["net_short"] is not None else None,
+            "unit": "계약", "asof": cftc["date"],
+            "pctile": cftc["pctile"], "n_weeks": cftc["n_weeks"],
+        }
+    else:
+        metrics["cftc_short"] = {"label": "헤지펀드 엔 순숏(청산 연료)",
+                                 "value": None, "unit": "계약", "pctile": None}
+
+    # --- 6. 달러 조달 스트레스 프록시 (SOFR - 3M T-bill) -------------
+    fund_bp, fund_d = funding_stress_proxy()
+    print(f"funding_proxy(SOFR-DTB3)={fund_bp}bp")
+    metrics["funding"] = {"label": "달러 조달 스트레스(프록시)",
+                          "value": fund_bp, "unit": "bp", "asof": fund_d}
+
     # ----------------------------------------------------------------
     # 리스크 점수화
     #   각 지표를 0~100 위험도로 정규화 → 가중합
@@ -274,14 +411,25 @@ def collect():
     # (금리 상승 = 자국 회귀 유인 = 청산 압력)
     sub["jp10y"] = band(jp10y, 1.5, 3.5) if jp10y is not None else None
 
-    # 가중치 (합 = 1.0)  — 조달비용·환율 트리거에 무게.
+    # CFTC 엔 순숏 백분위: 청산 '연료량'. 백분위 자체가 0~100 위험도.
+    # 순숏이 3년 고점(백분위 100)일수록 청산 시 매도 압력 큼.
+    cftc_pctile = metrics.get("cftc_short", {}).get("pctile")
+    sub["cftc_short"] = cftc_pctile if cftc_pctile is not None else None
+
+    # 달러 조달 스트레스 프록시: SOFR-DTB3. 0bp→위험0, 40bp→위험100.
+    # 진짜 XCCY basis 아님(무료 소스 없음). 방향성 근사용.
+    sub["funding"] = band(fund_bp, 0.0, 40.0) if fund_bp is not None else None
+
+    # 가중치 (합 = 1.0)  — 조달비용·환율 트리거·청산 연료에 무게.
     weights = {
-        "rate_gap": 0.20,
-        "jp10y":    0.15,
-        "yen_3d":   0.25,
-        "vix":      0.12,
-        "move":     0.13,
-        "hy_oas":   0.15,
+        "rate_gap":   0.16,
+        "jp10y":      0.12,
+        "yen_3d":     0.20,
+        "cftc_short": 0.15,   # 청산 연료 (선행)
+        "vix":        0.09,
+        "move":       0.10,
+        "hy_oas":     0.11,
+        "funding":    0.07,   # 달러 조달 스트레스 프록시
     }
 
     num, den = 0.0, 0.0
@@ -318,6 +466,8 @@ def collect():
             "vix_move": "VIX+MOVE 동반 상승 시 캐리청산형 충격 가능성.",
             "hy_oas": "사모신용·CLO는 후행. 유동성 있는 HY OAS 를 선행 프록시로 사용.",
             "jp10y": "FRED 월간(OECD) 근사. 실시간 JGB 는 무료 제약으로 지연 가능.",
+            "cftc_short": "CFTC 주간 발표(화요일 기준, 금요일 공개). 헤지펀드 엔 순숏의 3년 백분위 = 청산 시 풀릴 매도 압력의 크기.",
+            "funding": "SOFR-3M T-bill 스프레드. 진짜 크로스커런시 베이시스가 아닌 달러 조달 스트레스 근사 프록시(무료 소스 제약).",
         },
     }
 
@@ -346,10 +496,12 @@ def build_analysis_prompt(data):
         line("jp10y", "jp10y"), line("rate_gap", "rate_gap"),
         "[② 환율 트리거]",
         line("usdjpy"), line("yen_3d", "yen_3d"),
-        "[③ 변동성 전이]",
+        "[③ 청산 연료]",
+        line("cftc_short", "cftc_short"),
+        "[④ 변동성 전이]",
         line("vix", "vix"), line("move", "move"),
-        "[④ 크레딧 경로]",
-        line("hy_oas", "hy_oas"), line("ig_oas"),
+        "[⑤ 크레딧·조달 경로]",
+        line("hy_oas", "hy_oas"), line("ig_oas"), line("funding", "funding"),
     ])
 
     prompt = f"""너는 엔캐리 트레이드 청산 리스크를 감시하는 매크로 애널리스트다.
@@ -359,16 +511,19 @@ def build_analysis_prompt(data):
 
 [판정 기준]
 - 엔 3일 강세율 3% 돌파 = 마진콜 도미노 임계 (2024.8 사례)
+- 헤지펀드 엔 순숏 백분위가 높을수록 = 청산 시 풀릴 매도 '연료'가 많음(선행)
 - VIX+MOVE 동반 상승 = 단순 조정이 아닌 캐리청산형 충격 신호
 - 미일 금리차 '축소 속도'가 청산 압력의 선행지표
 - 일본 10Y 금리 상승 = 일본 기관의 자국 회귀(해외자산 매도) 유인
 - HY 스프레드 확대 = 사모신용·CLO 스트레스의 선행 프록시
-- 통상 ①②가 먼저 악화되고 ③④가 뒤따름
+- 달러 조달 스트레스(프록시) 상승 = 달러 자금 경색 조짐
+- 통상 ①②③(연료 축적)이 먼저 쌓이고 ④⑤가 뒤따름
 
 [작성 규칙]
 - 한국어. 200~300자 내외로 압축.
 - 지금 데이터에서 '가장 경계할 지표 1~2개'를 수치와 함께 구체적으로 짚어라.
-- 4개 흐름 중 어느 단계까지 진행됐는지 한 문장으로 판정하라.
+- 특히 청산 연료(CFTC 순숏 백분위)가 높은데 트리거(엔 강세)가 붙는 조합을 주의 깊게 보라.
+- 어느 단계까지 진행됐는지 한 문장으로 판정하라.
 - 다음에 지켜볼 트리거(구체적 수치 조건)를 한 가지 제시하라.
 - 투자 조언·매매 지시는 하지 마라. 상태 진단만.
 - 불릿 없이 자연스러운 산문 2~3문장으로."""
