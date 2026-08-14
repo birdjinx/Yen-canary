@@ -169,15 +169,17 @@
 <div id="app"><div class="err" style="color:var(--muted)">데이터 로딩 중…</div></div>
 
 <div class="note">
-  <b>읽는 법</b> — 지표는 4개 흐름 순서로 배열돼 있습니다.
-  ①조달비용 → ②환율 트리거 → ③변동성 전이 → ④크레딧 경로.
-  통상 ①②가 먼저 악화되고 ③④가 뒤따릅니다.
+  <b>읽는 법</b> — 지표는 5개 흐름 순서로 배열돼 있습니다.
+  ①조달비용 → ②환율 트리거 → ③청산 연료 → ④변동성 전이 → ⑤크레딧·조달 경로.
+  통상 ①②③(연료 축적)이 먼저 쌓이고 ④⑤가 뒤따릅니다.
   각 카드 하단 막대는 그 지표의 위험 기여도(0~100)입니다.
   <ul>
-    <li><b>엔 3일 강세율 3% 돌파</b> — 마진콜 도미노 임계 (2024.8 사례).</li>
+    <li><b>헤지펀드 엔 순숏(청산 연료)</b> — 순숏이 3년 백분위 상단일수록 청산 시 풀릴 매도 압력이 큼. CFTC 주간 발표(화요일 기준).</li>
+    <li><b>엔 3일 강세율 3% 돌파</b> — 마진콜 도미노 임계 (2024.8 사례). 연료가 쌓인 상태에서 이 트리거가 붙는 조합이 가장 위험.</li>
     <li><b>VIX + MOVE 동반 상승</b> — 단순 조정이 아닌 캐리청산형 충격 신호.</li>
     <li><b>HY 스프레드 확대</b> — 사모신용·CLO는 후행하므로 유동성 있는 HY OAS를 선행 프록시로.</li>
-    <li>일본 10년물은 FRED 월간(OECD) 근사치라 실시간 대비 지연될 수 있습니다.</li>
+    <li><b>달러 조달 스트레스</b>는 SOFR-3M T-bill 기반 <b>근사 프록시</b>입니다. 진짜 크로스커런시 베이시스는 무료 소스가 없어, 방향성만 참고하세요.</li>
+    <li>일본 10년물은 수동 입력값이 없으면 FRED 월간(OECD) 근사치라 실시간 대비 지연될 수 있습니다.</li>
   </ul>
 </div>
 
@@ -200,10 +202,12 @@ const GROUPS = [
    keys:["us2y","us10y","jp10y","rate_gap"], sub:{rate_gap:"rate_gap", jp10y:"jp10y"}},
   {n:"②", title:"환율 트리거",
    keys:["usdjpy","yen_3d"], sub:{yen_3d:"yen_3d"}},
-  {n:"③", title:"변동성 전이",
+  {n:"③", title:"청산 연료 · Positioning",
+   keys:["cftc_short"], sub:{cftc_short:"cftc_short"}},
+  {n:"④", title:"변동성 전이",
    keys:["vix","move"], sub:{vix:"vix", move:"move"}},
-  {n:"④", title:"크레딧 경로",
-   keys:["hy_oas","ig_oas"], sub:{hy_oas:"hy_oas"}},
+  {n:"⑤", title:"크레딧·조달 경로",
+   keys:["hy_oas","ig_oas","funding"], sub:{hy_oas:"hy_oas", funding:"funding"}},
 ];
 
 function riskColor(v){
@@ -226,6 +230,8 @@ const BANDS = {
   vix:      [15.0, 40.0],
   move:     [90.0, 160.0],
   hy_oas:   [3.0, 8.0],
+  funding:  [0.0, 40.0],  // SOFR-DTB3, bp
+  // cftc_short 는 백분위 자체가 위험도라 band 없음 (subscore 그대로 사용)
 };
 function bandRisk(val, key){
   const b = BANDS[key];
@@ -342,9 +348,20 @@ function render(){
       let dispVal = m.value, dispUnit = m.unit||"";
       if(key==="jp10y") dispVal = jpShown;
       if(key==="rate_gap") dispVal = gapShown;
+      // 큰 계약수는 천단위 콤마
+      let dispValFmt = dispVal;
+      if(key==="cftc_short" && typeof dispVal==="number"){
+        dispValFmt = dispVal.toLocaleString("en-US");
+      }
       const valHtml = (dispVal==null)
         ? '<span style="color:var(--muted)">—</span>'
-        : dispVal + (dispUnit?`<span class="u">${dispUnit}</span>`:"");
+        : dispValFmt + (dispUnit?`<span class="u">${dispUnit}</span>`:"");
+
+      // CFTC 카드: 3년 백분위를 부가 설명으로
+      let cftcNote = "";
+      if(key==="cftc_short" && m.pctile!=null){
+        cftcNote = `<div class="fred-ref">3년 순숏 백분위 ${m.pctile}%${m.n_weeks?` · ${m.n_weeks}주 표본`:""}</div>`;
+      }
 
       // jp10y 카드: 미리보기 + GitHub 편집으로 확정
       let extra = "";
@@ -381,6 +398,7 @@ function render(){
         <div class="lab">${m.label||key}</div>
         <div class="val">${valHtml}</div>
         ${m.asof?`<div class="asof">as of ${m.asof}</div>`:""}
+        ${cftcNote}
         ${risk!=null?`<div class="sub">위험기여 ${risk}</div>`:""}
         ${risk!=null?`<div class="risk-bar"><span style="width:${risk}%;background:${riskColor(risk)}"></span></div>`:""}
         ${extra}
