@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+yen-canary : 엔캐리 트레이드 청산 조기경보 모니터
+데이터 수집 스크립트
+
+수집 경로
+  - FRED API   : 미/일 국채금리, 크레딧 스프레드 (무료 API 키 필요)
+  - Yahoo Fin. : USD/JPY 환율, VIX, MOVE (키 불필요)
+
+출력
+  - docs/data.json  : 대시보드(docs/index.html)가 직접 fetch
+
+환경변수
+  FRED_API_KEY : GitHub Actions Secrets 에 등록
+"""
+
+import os
+import json
+import time
+import datetime as dt
+from urllib.parse import urlencode
+
+import requests
+
+FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
+UA = {"User-Agent": "Mozilla/5.0 (yen-canary monitor)"}
+TIMEOUT = 20
+
+# ----------------------------------------------------------------------
+# 공통 유틸
+# ----------------------------------------------------------------------
+def _retry(fn, *args, tries=3, wait=2, **kwargs):
+    """네트워크 호출을 몇 번 재시도. 실패하면 None."""
+    for i in range(tries):
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:  # noqa
+            print(f"   ! attempt {i+1}/{tries} failed: {e}")
+            time.sleep(wait)
+    return None
+
+
+# ----------------------------------------------------------------------
+# FRED
+# ----------------------------------------------------------------------
+FRED_SERIES = {
+    # 미국
+    "US10Y": "DGS10",        # 미 국채 10년
+    "US2Y":  "DGS2",         # 미 국채 2년
+    # 크레딧 스프레드 (미국)
+    "HY_OAS":  "BAMLH0A0HYM2",   # ICE BofA US High Yield OAS (%)
+    "IG_OAS":  "BAMLC0A0CM",     # ICE BofA US Corporate OAS (%)
+    # 단기 자금시장 스트레스
+    "SOFR":  "SOFR",         # SOFR
+    # 일본
+    "JP10Y": "IRLTLT01JPM156N",  # 일본 장기국채금리(월간, OECD) - 폴백용
+}
+
+
+def fred_latest(series_id):
+    """FRED 시계열의 최신 유효값 1개 반환 (value, date)."""
+    if not FRED_KEY:
+        return None, None
+    base = "https://api.stlouisfed.org/fred/series/observations"
+    q = {
+        "series_id": series_id,
+        "api_key": FRED_KEY,
+        "file_type": "json",
+        "sort_order": "desc",
+        "limit": 10,
+    }
+    url = base + "?" + urlencode(q)
+
+    def _call():
+        r = requests.get(url, headers=UA, timeout=TIMEOUT)
+        r.raise_for_status()
+        return r.json()
+
+    data = _retry(_call)
+    if not data:
+        return None, None
+    for obs in data.get("observations", []):
+        v = obs.get("value", ".")
+        if v not in (".", "", None):
+            try:
+                return float(v), obs.get("date")
+            except ValueError:
+                continue
+    return None, None
+
+
+# ----------------------------------------------------------------------
+# Yahoo Finance  (키 불필요)
+# ----------------------------------------------------------------------
+def yahoo_series(symbol, rng="1mo", interval="1d"):
+    """
+    Yahoo Finance chart API.
+    반환: (closes[list], last_close, prev_close_3d)
+    query1 이 막히면 query2 로 폴백.
+    """
+    hosts = [
+        "https://query1.finance.yahoo.com",
+        "https://query2.finance.yahoo.com",
+    ]
+    params = {"range": rng, "interval": interval}
+
+    for host in hosts:
+        url = f"{host}/v8/finance/chart/{symbol}?" + urlencode(params)
+
+        def _call():
+            r = requests.get(url, headers=UA, timeout=TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+
+        data = _retry(_call, tries=2)
+        if not data:
+            continue
+        try:
+            res = data["chart"]["result"][0]
+            closes = res["indicators"]["quote"][0]["close"]
+            closes = [c for c in closes if c is not None]
+            if closes:
+                return closes
+        except (KeyError, IndexError, TypeError):
+            continue
+    return []
+
+
+def yahoo_last(symbol, rng="1mo"):
+    closes = yahoo_series(symbol, rng=rng)
+    return closes[-1] if closes else None
+
+
+# ----------------------------------------------------------------------
+# 지표 계산
+# ----------------------------------------------------------------------
+def pct_change_ndays(closes, n=3):
+    """최근 n거래일 누적 변화율(%). 데이터 부족 시 None."""
+    if not closes or len(closes) <= n:
+        return None
+    old = closes[-1 - n]
+    new = closes[-1]
+    if old in (0, None) or new is None:
+        return None
+    return (new - old) / old * 100.0
+
+
+def collect():
+    print("=== yen-canary : collecting ===")
+    now = dt.datetime.utcnow().replace(microsecond=0)
+
+    metrics = {}
+
+    # --- 1. 조달비용: 미일 금리차 ------------------------------------
+    us2y, us2y_d = fred_latest(FRED_SERIES["US2Y"])
+    us10y, _ = fred_latest(FRED_SERIES["US10Y"])
+    print(f"US2Y={us2y} US10Y={us10y}")
+
+    # 일본 금리: Yahoo 티커(^TNX 계열은 미국). 일본 10Y는 무료 실시간이 제한적이라
+    # FRED 월간(OECD)을 1차로 쓰되, 있으면 Yahoo 의 JGB 프록시로 보완.
+    jp10y, jp10y_d = fred_latest(FRED_SERIES["JP10Y"])
+    print(f"JP10Y(FRED월간)={jp10y}")
+
+    us_jp_2y_gap = None
+    if us2y is not None and jp10y is not None:
+        # 엄밀히는 JP2Y 가 이상적이나 무료 실시간 제약으로 JP10Y 근사.
+        # 스프레드의 '수준'보다 '추세'를 보는 용도.
+        us_jp_2y_gap = round(us2y - jp10y, 3)
+
+    metrics["us2y"] = {"label": "미 국채 2년", "value": us2y, "unit": "%", "asof": us2y_d}
+    metrics["us10y"] = {"label": "미 국채 10년", "value": us10y, "unit": "%"}
+    metrics["jp10y"] = {"label": "일 국채 10년(월간)", "value": jp10y, "unit": "%", "asof": jp10y_d}
+    metrics["rate_gap"] = {"label": "미일 금리차(2Y-JP10Y 근사)", "value": us_jp_2y_gap, "unit": "%p"}
+
+    # --- 2. 환율 (트리거) -------------------------------------------
+    jpy_closes = yahoo_series("JPY=X", rng="1mo")
+    usdjpy = jpy_closes[-1] if jpy_closes else None
+    jpy_3d = pct_change_ndays(jpy_closes, 3)
+    # USD/JPY 하락 = 엔 강세. 엔 강세율(양수)로 변환.
+    yen_strength_3d = (-jpy_3d) if jpy_3d is not None else None
+    print(f"USDJPY={usdjpy} yen_strength_3d={yen_strength_3d}")
+
+    metrics["usdjpy"] = {"label": "달러/엔", "value": round(usdjpy, 2) if usdjpy else None, "unit": "엔"}
+    metrics["yen_3d"] = {"label": "엔화 3일 강세율", "value": round(yen_strength_3d, 2) if yen_strength_3d is not None else None, "unit": "%"}
+
+    # --- 3. 변동성 (2차 전이) ---------------------------------------
+    vix = yahoo_last("^VIX")
+    move = yahoo_last("^MOVE")
+    print(f"VIX={vix} MOVE={move}")
+    metrics["vix"] = {"label": "VIX (주식 변동성)", "value": round(vix, 2) if vix else None, "unit": ""}
+    metrics["move"] = {"label": "MOVE (채권 변동성)", "value": round(move, 2) if move else None, "unit": ""}
+
+    # --- 4. 크레딧 스프레드 (신용·채권 경로) --------------------------
+    hy, hy_d = fred_latest(FRED_SERIES["HY_OAS"])
+    ig, _ = fred_latest(FRED_SERIES["IG_OAS"])
+    print(f"HY_OAS={hy} IG_OAS={ig}")
+    metrics["hy_oas"] = {"label": "美 하이일드 스프레드(OAS)", "value": hy, "unit": "%", "asof": hy_d}
+    metrics["ig_oas"] = {"label": "美 투자등급 스프레드(OAS)", "value": ig, "unit": "%"}
+
+    # ----------------------------------------------------------------
+    # 리스크 점수화
+    #   각 지표를 0~100 위험도로 정규화 → 가중합
+    #   임계값은 문헌/과거 사례(2024.8 등) 기반의 러프한 기준.
+    #   대시보드에서 조정 가능하도록 근거를 주석에 명시.
+    # ----------------------------------------------------------------
+    def band(value, low, high):
+        """value 를 [low(위험0), high(위험100)] 구간으로 선형 정규화."""
+        if value is None:
+            return None
+        if high == low:
+            return 0.0
+        x = (value - low) / (high - low) * 100.0
+        return max(0.0, min(100.0, x))
+
+    sub = {}
+
+    # 금리차 축소 = 위험. 근사 스프레드가 낮을수록 위험 → 축을 뒤집음.
+    # 미일 정책금리차가 좁혀질수록 캐리 수익 훼손.
+    sub["rate_gap"] = band(us_jp_2y_gap, 4.0, 1.0) if us_jp_2y_gap is not None else None
+
+    # 엔 3일 강세율: 3%↑ 가 마진콜 임계 (2024.8). 0%→위험0, 3%→위험100.
+    sub["yen_3d"] = band(yen_strength_3d, 0.0, 3.0) if yen_strength_3d is not None else None
+
+    # VIX: 평상 15 → 위험0, 40(패닉) → 위험100.
+    sub["vix"] = band(vix, 15.0, 40.0) if vix is not None else None
+    # MOVE: 평상 90 → 위험0, 160 → 위험100.
+    sub["move"] = band(move, 90.0, 160.0) if move is not None else None
+
+    # HY OAS: 3%(평온) → 위험0, 8%(스트레스) → 위험100.
+    sub["hy_oas"] = band(hy, 3.0, 8.0) if hy is not None else None
+
+    # 일본 10년 금리 절대수준: 1.5% → 위험0, 3.5% → 위험100.
+    # (금리 상승 = 자국 회귀 유인 = 청산 압력)
+    sub["jp10y"] = band(jp10y, 1.5, 3.5) if jp10y is not None else None
+
+    # 가중치 (합 = 1.0)  — 조달비용·환율 트리거에 무게.
+    weights = {
+        "rate_gap": 0.20,
+        "jp10y":    0.15,
+        "yen_3d":   0.25,
+        "vix":      0.12,
+        "move":     0.13,
+        "hy_oas":   0.15,
+    }
+
+    num, den = 0.0, 0.0
+    for k, w in weights.items():
+        s = sub.get(k)
+        if s is not None:
+            num += s * w
+            den += w
+    total = round(num / den, 1) if den > 0 else None
+
+    if total is None:
+        level = "unknown"
+    elif total < 25:
+        level = "calm"        # 평온
+    elif total < 50:
+        level = "watch"       # 경계
+    elif total < 70:
+        level = "elevated"    # 주의
+    else:
+        level = "alarm"       # 경보
+
+    out = {
+        "updated_utc": now.isoformat() + "Z",
+        "score": total,
+        "level": level,
+        "subscores": {k: (round(v, 1) if v is not None else None) for k, v in sub.items()},
+        "weights": weights,
+        "metrics": metrics,
+        "notes": {
+            "rate_gap": "미일 2Y-JP10Y 근사 스프레드. 축소 속도가 청산 압력의 선행지표.",
+            "yen_3d": "3거래일 누적 엔 강세 3% 돌파 시 마진콜 도미노 임계(2024.8 사례).",
+            "vix_move": "VIX+MOVE 동반 상승 시 캐리청산형 충격 가능성.",
+            "hy_oas": "사모신용·CLO는 후행. 유동성 있는 HY OAS 를 선행 프록시로 사용.",
+            "jp10y": "FRED 월간(OECD) 근사. 실시간 JGB 는 무료 제약으로 지연 가능.",
+        },
+    }
+
+    return out
+
+
+def main():
+    data = collect()
+    os.makedirs("docs", exist_ok=True)
+    with open("docs/data.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    print("=== written docs/data.json ===")
+    print(f"score={data['score']} level={data['level']}")
+
+
+if __name__ == "__main__":
+    main()
