@@ -12,7 +12,8 @@ yen-canary : 엔캐리 트레이드 청산 조기경보 모니터
   - docs/data.json  : 대시보드(docs/index.html)가 직접 fetch
 
 환경변수
-  FRED_API_KEY : GitHub Actions Secrets 에 등록
+  FRED_API_KEY      : GitHub Actions Secrets 에 등록 (필수)
+  ANTHROPIC_API_KEY : Claude 분석 코멘트용 (선택 — 없으면 코멘트만 생략)
 """
 
 import os
@@ -24,6 +25,9 @@ from urllib.parse import urlencode
 import requests
 
 FRED_KEY = os.environ.get("FRED_API_KEY", "").strip()
+ANTHROPIC_KEY = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+# 저비용 고정: Haiku 4.5 ($1/$5 per MTok). 회당 약 0.4센트.
+ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 UA = {"User-Agent": "Mozilla/5.0 (yen-canary monitor)"}
 TIMEOUT = 20
 
@@ -282,13 +286,114 @@ def collect():
     return out
 
 
+# ----------------------------------------------------------------------
+# Claude API 분석 코멘트  (Haiku 4.5, 저비용)
+# ----------------------------------------------------------------------
+def build_analysis_prompt(data):
+    """수집 결과를 근거 있는 진단이 나오도록 구조화해 프롬프트로."""
+    m = data["metrics"]
+    s = data["subscores"]
+
+    def line(key, skey=None):
+        mm = m.get(key, {})
+        val = mm.get("value")
+        unit = mm.get("unit", "")
+        risk = s.get(skey) if skey else None
+        r = f" [위험기여 {risk}/100]" if risk is not None else ""
+        return f"  - {mm.get('label', key)}: {val}{unit}{r}"
+
+    facts = "\n".join([
+        "[① 조달비용]",
+        line("us2y"), line("us10y"),
+        line("jp10y", "jp10y"), line("rate_gap", "rate_gap"),
+        "[② 환율 트리거]",
+        line("usdjpy"), line("yen_3d", "yen_3d"),
+        "[③ 변동성 전이]",
+        line("vix", "vix"), line("move", "move"),
+        "[④ 크레딧 경로]",
+        line("hy_oas", "hy_oas"), line("ig_oas"),
+    ])
+
+    prompt = f"""너는 엔캐리 트레이드 청산 리스크를 감시하는 매크로 애널리스트다.
+아래는 방금 수집된 지표다. 종합 청산 리스크 점수는 {data['score']}/100 (등급: {data['level']}).
+
+{facts}
+
+[판정 기준]
+- 엔 3일 강세율 3% 돌파 = 마진콜 도미노 임계 (2024.8 사례)
+- VIX+MOVE 동반 상승 = 단순 조정이 아닌 캐리청산형 충격 신호
+- 미일 금리차 '축소 속도'가 청산 압력의 선행지표
+- 일본 10Y 금리 상승 = 일본 기관의 자국 회귀(해외자산 매도) 유인
+- HY 스프레드 확대 = 사모신용·CLO 스트레스의 선행 프록시
+- 통상 ①②가 먼저 악화되고 ③④가 뒤따름
+
+[작성 규칙]
+- 한국어. 200~300자 내외로 압축.
+- 지금 데이터에서 '가장 경계할 지표 1~2개'를 수치와 함께 구체적으로 짚어라.
+- 4개 흐름 중 어느 단계까지 진행됐는지 한 문장으로 판정하라.
+- 다음에 지켜볼 트리거(구체적 수치 조건)를 한 가지 제시하라.
+- 투자 조언·매매 지시는 하지 마라. 상태 진단만.
+- 불릿 없이 자연스러운 산문 2~3문장으로."""
+    return prompt
+
+
+def claude_analysis(data):
+    """Claude Haiku 로 진단 코멘트 생성. 실패 시 None (대시보드는 정상 동작)."""
+    if not ANTHROPIC_KEY:
+        print("   (ANTHROPIC_API_KEY 없음 — 분석 코멘트 생략)")
+        return None
+
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {
+        "x-api-key": ANTHROPIC_KEY,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "model": ANTHROPIC_MODEL,
+        "max_tokens": 500,
+        "messages": [
+            {"role": "user", "content": build_analysis_prompt(data)}
+        ],
+    }
+
+    def _call():
+        r = requests.post(url, headers=headers, json=body, timeout=40)
+        r.raise_for_status()
+        return r.json()
+
+    resp = _retry(_call, tries=2, wait=3)
+    if not resp:
+        print("   ! Claude 분석 실패 — 코멘트 생략")
+        return None
+    try:
+        parts = [b.get("text", "") for b in resp.get("content", []) if b.get("type") == "text"]
+        text = "".join(parts).strip()
+        usage = resp.get("usage", {})
+        print(f"   Claude ok (in={usage.get('input_tokens')} out={usage.get('output_tokens')})")
+        return text or None
+    except Exception as e:  # noqa
+        print(f"   ! Claude 파싱 실패: {e}")
+        return None
+
+
 def main():
     data = collect()
+
+    # Claude 진단 코멘트 (선택). 지표 수집이 끝난 뒤 실행.
+    print("=== Claude analysis ===")
+    comment = claude_analysis(data)
+    data["analysis"] = {
+        "text": comment,
+        "model": ANTHROPIC_MODEL if comment else None,
+        "generated_utc": (dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z") if comment else None,
+    }
+
     os.makedirs("docs", exist_ok=True)
     with open("docs/data.json", "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     print("=== written docs/data.json ===")
-    print(f"score={data['score']} level={data['level']}")
+    print(f"score={data['score']} level={data['level']} analysis={'yes' if comment else 'no'}")
 
 
 if __name__ == "__main__":
