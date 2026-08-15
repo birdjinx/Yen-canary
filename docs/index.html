@@ -199,7 +199,7 @@ const LEVEL = {
 // 카테고리 배열 (라벨 순서 = 흐름 순서)
 const GROUPS = [
   {n:"①", title:"조달비용 · Cost of Carry",
-   keys:["us2y","us10y","jp10y","rate_gap"], sub:{rate_gap:"rate_gap", jp10y:"jp10y"}},
+   keys:["us2y","us10y","jp2y","jp10y","rate_gap"], sub:{rate_gap:"rate_gap", jp10y:"jp10y"}},
   {n:"②", title:"환율 트리거",
    keys:["usdjpy","yen_3d"], sub:{yen_3d:"yen_3d"}},
   {n:"③", title:"청산 연료 · Positioning",
@@ -251,6 +251,7 @@ function levelOf(total){
 
 let DATA = null;         // 원본 (수집값)
 let previewJp = null;    // 화면 미리보기용 일본 10Y 임시값 (null = 원본 사용)
+let previewJp2 = null;   // 화면 미리보기용 일본 2Y 임시값 (null = 원본 사용)
 
 async function load(){
   try{
@@ -275,20 +276,36 @@ function render(){
   const baseS = data.subscores||{};
   const weights = data.weights||{};
 
-  // 미리보기 값이 있으면 jp10y·rate_gap·총점을 다시 계산
-  const usingPreview = (previewJp != null);
+  // 미리보기: jp10y / jp2y 각각 임시값 반영 → jp10y·jp2y·rate_gap·총점 재계산
+  const usingPreview = (previewJp != null || previewJp2 != null);
   const S = Object.assign({}, baseS);
-  let jpShown = M.jp10y ? M.jp10y.value : null;
+
+  // 표시값 기본은 저장값
+  let jpShown  = M.jp10y ? M.jp10y.value : null;
+  let jp2Shown = M.jp2y  ? M.jp2y.value  : null;
   let gapShown = M.rate_gap ? M.rate_gap.value : null;
 
-  if(usingPreview){
+  // jp10y 미리보기 → 자국회귀 위험(jp10y) 갱신
+  if(previewJp != null){
     jpShown = previewJp;
     S.jp10y = bandRisk(previewJp, "jp10y");
-    const us2y = M.us2y ? M.us2y.value : null;
-    if(us2y!=null){
-      gapShown = Math.round((us2y - previewJp)*1000)/1000;
-      S.rate_gap = bandRisk(gapShown, "rate_gap");
+  }
+  // jp2y 미리보기 → 표시값 갱신
+  if(previewJp2 != null){
+    jp2Shown = previewJp2;
+  }
+
+  // rate_gap 재계산: jp2y(정석) 우선, 없으면 jp10y(폴백)
+  const us2yVal = M.us2y ? M.us2y.value : null;
+  if(usingPreview && us2yVal != null){
+    const jp2eff = (jp2Shown != null) ? jp2Shown : null;
+    if(jp2eff != null){
+      gapShown = Math.round((us2yVal - jp2eff)*1000)/1000;   // 정석
+    }else{
+      const jp10eff = (jpShown != null) ? jpShown : null;
+      if(jp10eff != null) gapShown = Math.round((us2yVal - jp10eff)*1000)/1000; // 폴백
     }
+    if(gapShown != null) S.rate_gap = bandRisk(gapShown, "rate_gap");
   }
 
   // 총점 재계산 (가중 평균, null 지표는 제외)
@@ -344,9 +361,10 @@ function render(){
       let risk = subKey ? S[subKey] : null;
       if(risk!=null) risk = Math.round(risk*10)/10;
 
-      // 표시값: jp10y·rate_gap 은 미리보기 반영
+      // 표시값: jp10y·jp2y·rate_gap 은 미리보기 반영
       let dispVal = m.value, dispUnit = m.unit||"";
       if(key==="jp10y") dispVal = jpShown;
+      if(key==="jp2y")  dispVal = jp2Shown;
       if(key==="rate_gap") dispVal = gapShown;
       // 큰 계약수는 천단위 콤마
       let dispValFmt = dispVal;
@@ -363,30 +381,38 @@ function render(){
         cftcNote = `<div class="fred-ref">3년 순숏 백분위 ${m.pctile}%${m.n_weeks?` · ${m.n_weeks}주 표본`:""}</div>`;
       }
 
-      // jp10y 카드: 미리보기 + GitHub 편집으로 확정
+      // jp10y / jp2y 카드: 미리보기 + GitHub 편집으로 확정
       let extra = "";
-      if(key==="jp10y"){
+      if(key==="jp10y" || key==="jp2y"){
+        const isJp2 = (key==="jp2y");
+        const inputId = isJp2 ? "jp2Input" : "jpInput";
+        const applyFn = isJp2 ? "applyPreview2()" : "applyPreview()";
+        const clearFn = isJp2 ? "clearPreview2()" : "clearPreview()";
+        const curPrev = isJp2 ? previewJp2 : previewJp;
+        const thisPreviewing = (curPrev != null);
         const fredRef = (m.fred_ref!=null) ? m.fred_ref : null;
-        const srcTxt = usingPreview ? "미리보기 입력값"
-                      : (m.src==="manual" ? "manual.json 적용중" : "FRED 근사");
+        const srcTxt = thisPreviewing ? "미리보기 입력값"
+                      : (m.src==="manual" ? "manual.json 적용중"
+                         : (isJp2 ? "미입력 (금리차는 10Y로 폴백)" : "FRED 근사"));
         const canConfirm = !!(data.repo);
+        const ph = isJp2 ? "예: 0.85" : "예: 1.62";
         extra = `
           ${fredRef!=null?`<div class="fred-ref">FRED 참고 ${fredRef}%</div>`:""}
           <div class="manual-edit">
             <label>정확한 값 입력 (${srcTxt})</label>
             <div class="manual-row">
-              <input id="jpInput" type="number" step="0.01" placeholder="예: 1.62"
-                     value="${usingPreview?previewJp:""}"
-                     onkeydown="if(event.key==='Enter'){event.preventDefault();applyPreview();}">
-              <button onclick="applyPreview()">미리보기</button>
-              <button onclick="clearPreview()">초기화</button>
+              <input id="${inputId}" type="number" step="0.01" placeholder="${ph}"
+                     value="${thisPreviewing?curPrev:""}"
+                     onkeydown="if(event.key==='Enter'){event.preventDefault();${applyFn};}">
+              <button onclick="${applyFn}">미리보기</button>
+              <button onclick="${clearFn}">초기화</button>
             </div>
             <div class="manual-row" style="margin-top:7px">
-              <button class="confirm" onclick="confirmValue()" ${canConfirm?"":"disabled"}>
-                이 값으로 확정 →
+              <button class="confirm" onclick="confirmValues()" ${canConfirm?"":"disabled"}>
+                수동값 확정 →
               </button>
             </div>
-            <div class="preview-flag ${usingPreview?'on':''}">
+            <div class="preview-flag ${thisPreviewing?'on':''}">
               지금은 화면 미리보기입니다. "확정"을 누르면 GitHub 편집 화면이 열리고,
               커밋하면 재수집·분석이 자동 실행됩니다.
             </div>
@@ -420,27 +446,54 @@ function applyPreview(){
   previewJp = v;
   render();
 }
-function clearPreview(){
-  previewJp = null;
+function clearPreview(){ previewJp = null; render(); }
+
+function applyPreview2(){
+  const el = document.getElementById("jp2Input");
+  if(!el) return;
+  const raw = (el.value||"").trim();
+  if(raw===""){ previewJp2 = null; render(); return; }
+  const v = parseFloat(raw);
+  if(isNaN(v)){ el.focus(); return; }
+  previewJp2 = v;
   render();
 }
-function confirmValue(){
-  const v = (previewJp!=null) ? previewJp
-          : parseFloat((document.getElementById("jpInput")||{}).value);
-  if(v==null || isNaN(v)){
-    const el=document.getElementById("jpInput"); if(el) el.focus(); return;
+function clearPreview2(){ previewJp2 = null; render(); }
+
+function confirmValues(){
+  if(!DATA || !DATA.repo){ return; }
+  const M = DATA.metrics || {};
+
+  // 확정에 쓸 값: 미리보기가 있으면 그 값, 없으면 현재 저장된 수동값 유지.
+  // (둘 다 없으면 null → FRED 폴백)
+  function effVal(previewV, metricKey){
+    if(previewV != null) return previewV;
+    const m = M[metricKey] || {};
+    if(m.src === "manual" && typeof m.value === "number") return m.value;
+    return null;
   }
-  if(!DATA.repo){ return; }
+  const jp10 = effVal(previewJp,  "jp10y");
+  const jp2  = effVal(previewJp2, "jp2y");
+
+  if(jp10==null && jp2==null){
+    // 확정할 수동값이 하나도 없음
+    const el=document.getElementById("jpInput")||document.getElementById("jp2Input");
+    if(el) el.focus();
+    return;
+  }
   const today = new Date().toISOString().slice(0,10);
-  // manual.json 전체 내용을 미리 채운다
   const content = JSON.stringify({
-    "_help": "jp10y.value를 실제 금리(%)로, asof를 기준일로. null이면 FRED 근사로 폴백.",
-    "jp10y": { "value": v, "asof": today }
+    "_help": "jp10y=일본 10년물, jp2y=일본 2년물(미일 금리차 US2Y-JP2Y 계산용). value를 실제 금리(%)로, asof를 기준일로. null이면 FRED 근사로 폴백.",
+    "jp10y": { "value": jp10, "asof": jp10!=null?today:null },
+    "jp2y":  { "value": jp2,  "asof": jp2!=null?today:null }
   }, null, 2) + "\n";
   const branch = DATA.branch || "main";
+  const msgBits = [];
+  if(jp10!=null) msgBits.push("jp10y "+jp10+"%");
+  if(jp2!=null)  msgBits.push("jp2y "+jp2+"%");
   const url = `https://github.com/${DATA.repo}/edit/${branch}/docs/manual.json`
             + `?value=${encodeURIComponent(content)}`
-            + `&message=${encodeURIComponent("manual: jp10y "+v+"% ("+today+")")}`;
+            + `&message=${encodeURIComponent("manual: "+msgBits.join(", ")+" ("+today+")")}`;
   window.open(url, "_blank");
 }
 load();
