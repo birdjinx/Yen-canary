@@ -319,17 +319,44 @@ def collect():
         jp10y_label = "일 국채 10년(월간·근사)"
         print(f"JP10Y(FRED월간)={jp10y}")
 
+    # 일본 2Y: 수동값(manual.json) 우선. 금리차의 정석 재료(만기 일치).
+    #   없으면 JP10Y 로 폴백(근사).
+    jp2y_manual = manual.get("jp2y") or {}
+    jp2y_val = jp2y_manual.get("value")
+    if isinstance(jp2y_val, (int, float)):
+        jp2y = float(jp2y_val)
+        jp2y_d = jp2y_manual.get("asof")
+        jp2y_src = "manual"
+        print(f"JP2Y(수동)={jp2y}")
+    else:
+        jp2y = None
+        jp2y_d = None
+        jp2y_src = None
+
+    metrics["jp2y"] = {"label": "일 국채 2년(수동)", "value": jp2y, "unit": "%",
+                       "asof": jp2y_d, "src": jp2y_src}
+
+    # 금리차: US2Y-JP2Y(정석) 우선, jp2y 없으면 US2Y-JP10Y(근사) 폴백.
     us_jp_2y_gap = None
-    if us2y is not None and jp10y is not None:
-        # 엄밀히는 JP2Y 가 이상적이나 무료 실시간 제약으로 JP10Y 근사.
-        # 스프레드의 '수준'보다 '추세'를 보는 용도.
+    if us2y is not None and jp2y is not None:
+        us_jp_2y_gap = round(us2y - jp2y, 3)
+        gap_label = "미일 2년 금리차(US2Y-JP2Y)"
+        gap_src = "jp2y"
+    elif us2y is not None and jp10y is not None:
+        # 폴백: 만기 불일치 근사. jp2y 입력하면 정석으로 승격됨.
         us_jp_2y_gap = round(us2y - jp10y, 3)
+        gap_label = "미일 금리차(US2Y-JP10Y 근사)"
+        gap_src = "jp10y_fallback"
+    else:
+        gap_label = "미일 금리차"
+        gap_src = None
 
     metrics["us2y"] = {"label": "미 국채 2년", "value": us2y, "unit": "%", "asof": us2y_d}
     metrics["us10y"] = {"label": "미 국채 10년", "value": us10y, "unit": "%"}
     metrics["jp10y"] = {"label": jp10y_label, "value": jp10y, "unit": "%",
                         "asof": jp10y_d, "src": jp10y_src, "fred_ref": jp10y_fred}
-    metrics["rate_gap"] = {"label": "미일 금리차(2Y-JP10Y 근사)", "value": us_jp_2y_gap, "unit": "%p"}
+    metrics["rate_gap"] = {"label": gap_label, "value": us_jp_2y_gap,
+                           "unit": "%p", "src": gap_src}
 
     # --- 2. 환율 (트리거) -------------------------------------------
     jpy_closes = yahoo_series("JPY=X", rng="1mo")
